@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# Defaults
-# =========================
 REALM="pve"
 
 TEACHERS_GROUP="Teachers"
@@ -14,26 +11,16 @@ STUDENTS_ROLE="StudentsLab"
 DEFAULT_STUDENT_USER="user"
 DEFAULT_STUDENT_PASS="P@ssw0rd"
 
-# =========================
-# Helpers
-# =========================
 die(){ echo "ERROR: $*" >&2; exit 1; }
 need_root(){ [[ $EUID -eq 0 ]] || die "Запусти от root"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
 validate_userid_localpart() {
-  local name="$1"
-  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+  [[ "${1:-}" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
-# =========================
-# Repo switch
-# =========================
-detect_codename() {
-  source /etc/os-release
-  [[ -n "${VERSION_CODENAME:-}" ]] || die "Не удалось определить Debian codename (VERSION_CODENAME)"
-  echo "$VERSION_CODENAME"
-}
+# ---------- repos ----------
+detect_codename(){ source /etc/os-release; [[ -n "${VERSION_CODENAME:-}" ]] || die "No VERSION_CODENAME"; echo "$VERSION_CODENAME"; }
 
 backup_apt() {
   local ts bak
@@ -45,11 +32,7 @@ backup_apt() {
   echo "$bak"
 }
 
-disable_list_file() {
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  sed -i -E 's/^[[:space:]]*deb[[:space:]]+/# deb /' "$f"
-}
+disable_list_file(){ [[ -f "$1" ]] && sed -i -E 's/^[[:space:]]*deb[[:space:]]+/# deb /' "$1"; }
 
 disable_sources_file() {
   local f="$1"
@@ -61,45 +44,30 @@ disable_sources_file() {
   fi
 }
 
-disable_enterprise_repos() {
+switch_repos_and_update() {
+  local bak; bak="$(backup_apt)"
+  echo "[*] Бэкап APT: $bak" >&2
+
   local changed=0
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
     [[ -e "$f" ]] || continue
     if grep -q "enterprise\.proxmox\.com" "$f" 2>/dev/null; then
-      if [[ "$f" == *.sources ]]; then
-        disable_sources_file "$f"
-      else
-        disable_list_file "$f"
-      fi
+      [[ "$f" == *.sources ]] && disable_sources_file "$f" || disable_list_file "$f"
       changed=1
     fi
   done
-  [[ $changed -eq 1 ]] && echo "[*] Enterprise репозитории отключены." >&2 || echo "[*] Enterprise не найдены/уже отключены." >&2
-}
+  [[ $changed -eq 1 ]] && echo "[*] Enterprise отключён" >&2 || echo "[*] Enterprise не найден/уже отключён" >&2
 
-enable_no_subscription_repo() {
-  local codename
-  codename="$(detect_codename)"
+  local codename; codename="$(detect_codename)"
   cat > /etc/apt/sources.list.d/pve-no-subscription.list <<EOF
 deb http://download.proxmox.com/debian/pve $codename pve-no-subscription
 EOF
-  echo "[*] Добавлен pve-no-subscription ($codename)." >&2
-}
-
-switch_repos_and_update() {
-  local bak
-  bak="$(backup_apt)"
-  echo "[*] Бэкап APT: $bak" >&2
-  disable_enterprise_repos
-  enable_no_subscription_repo
-  echo "[*] apt-get update..." >&2
+  echo "[*] Добавлен pve-no-subscription ($codename)" >&2
   apt-get update
-  echo "[+] Репозитории переключены и обновлены." >&2
+  echo "[+] apt update OK" >&2
 }
 
-# =========================
-# Password prompt
-# =========================
+# ---------- password ----------
 read_secret_twice_min8() {
   local prompt="$1" p1 p2
   while true; do
@@ -112,19 +80,13 @@ read_secret_twice_min8() {
   done
 }
 
-# =========================
-# Storage selection
-# =========================
+# ---------- storage ----------
 list_storages_images() {
-  have pvesm || die "Нет pvesm (это точно Proxmox VE?)"
-
-  # Prefer storages that support VM disks (images). Timeout prevents hangs.
+  have pvesm || die "Нет pvesm"
   if have timeout; then
-    timeout 5s pvesm status --content images 2>/tmp/pvesm_status.err \
-      | awk 'NR>1{print $1}' | sort -u
+    timeout 5s pvesm status --content images 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   else
-    pvesm status --content images 2>/tmp/pvesm_status.err \
-      | awk 'NR>1{print $1}' | sort -u
+    pvesm status --content images 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   fi
 }
 
@@ -136,26 +98,15 @@ storage_exists_any() {
 choose_storages_interactive() {
   local storages=() i choice selected=()
   mapfile -t storages < <(list_storages_images || true)
+  ((${#storages[@]} > 0)) || return 1
 
-  if ((${#storages[@]} == 0)); then
-    echo "[!] Не удалось автообнаружить storages с content=images. Введи вручную." >&2
-    if [[ -s /tmp/pvesm_status.err ]]; then
-      echo "    Ошибка pvesm:" >&2
-      sed 's/^/      /' /tmp/pvesm_status.err | tail -n 20 >&2
-    fi
-    return 1
-  fi
-
-  echo "Доступные storage (для дисков ВМ / images):" >&2
-  for i in "${!storages[@]}"; do
-    printf "  %2d) %s\n" $((i+1)) "${storages[$i]}" >&2
-  done
-  echo "Выбери storage через запятую (пример: 1,3) или 'a' = все:" >&2
+  echo "Доступные storage (images):" >&2
+  for i in "${!storages[@]}"; do printf "  %2d) %s\n" $((i+1)) "${storages[$i]}" >&2; done
+  echo "Выбери через запятую или 'a' = все:" >&2
   read -r choice
 
   if [[ "$choice" =~ ^[aA]$ ]]; then
-    printf "%s\n" "${storages[@]}"
-    return 0
+    printf "%s\n" "${storages[@]}"; return 0
   fi
 
   IFS=',' read -ra parts <<<"$choice"
@@ -165,114 +116,47 @@ choose_storages_interactive() {
     (( part>=1 && part<=${#storages[@]} )) || die "Номер вне диапазона: $part"
     selected+=("${storages[$((part-1))]}")
   done
-
   printf "%s\n" "${selected[@]}" | awk '!seen[$0]++'
 }
 
 get_storages() {
   echo "Storage режим:" >&2
-  echo "  1) Автообнаружение (images) + выбрать из списка" >&2
-  echo "  2) Указать вручную (через пробел или запятую)" >&2
+  echo "  1) Автообнаружение (images) + выбрать" >&2
+  echo "  2) Ввести вручную" >&2
   read -r -p "Выбор [1-2]: " mode
 
   case "${mode:-}" in
     1)
       if ! choose_storages_interactive; then
-        read -r -p "Введи storage IDs (пример: local-lvm) или через запятую: " s
+        echo "[!] Автообнаружение не удалось. Введи вручную (пример: local-lvm)" >&2
+        read -r -p "Storage IDs: " s
         s="${s//,/ }"
         for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
       fi
       ;;
     2)
-      read -r -p "Введи storage IDs (пример: local-lvm local) или через запятую: " s
+      read -r -p "Storage IDs (пример: local-lvm local): " s
       s="${s//,/ }"
       for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
       ;;
-    *)
-      die "Неверный выбор storage режима"
-      ;;
+    *) die "Неверный выбор" ;;
   esac
 }
 
-# =========================
-# Role autodetection from pveum role list (no JSON/Python)
-# =========================
-list_role_ids() {
-  pveum role list 2>/dev/null | awk 'NR>1 && NF{print $1}' | sort -u
-}
-
-get_role_privs() {
-  local rid="$1"
-  # remove first column + separators, return "privs" field
-  pveum role list 2>/dev/null | awk -v rid="$rid" '
-    NR>1 && $1==rid {
-      $1="";
-      sub(/^[ \t]+[|]?[ \t]+/,"");
-      print;
-      exit
-    }'
-}
-
-build_students_privs_from_roles() {
-  local roles=("PVEVMAdmin" "PVEDatastoreAdmin" "PVESDNUser")
-  local available
-  available="$(list_role_ids)"
-
-  local tmp
-  tmp="$(mktemp)"
-  : > "$tmp"
-
-  local r
-  for r in "${roles[@]}"; do
-    if grep -qx "$r" <<<"$available"; then
-      get_role_privs "$r" >> "$tmp"
-      echo "," >> "$tmp"
-    fi
-  done
-
-  # Fallback minimal set if none found
-  if [[ ! -s "$tmp" ]]; then
-    rm -f "$tmp"
-    echo "VM.Audit,VM.Allocate,VM.Console,VM.PowerMgmt,Datastore.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Allocate,Pool.Audit"
-    return 0
-  fi
-
-  # Split/trim/uniq + filter allow/deny
-  tr ',' '\n' < "$tmp" \
-    | tr -d '\r' \
-    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
-    | awk 'NF' \
-    | awk '
-        $0 ~ /^(Sys\.|User\.|Permissions\.|Realm\.|Group\.)/ {next}
-        $0 ~ /^(VM\.|Datastore\.|SDN\.|Pool\.)/ {print; next}
-        {next}
-      ' \
-    | sort -u \
-    | awk 'BEGIN{first=1} { if(!first) printf ","; printf "%s",$0; first=0 } END{ printf "\n" }'
-
-  rm -f "$tmp"
-}
-
+# ---------- role (auto-validate privs) ----------
 ensure_students_role_custom_auto() {
-  local role="StudentsLab"
+  local role="$STUDENTS_ROLE"
   local tmprole="__privcheck_tmp__$$"
 
-  # Максимально полный набор "нужных" привилегий для студентов:
-  # VM (создание/управление/консоль/бэкап/клон/снапшоты/guest-agent)
-  # + Storage (ISO/шаблоны/диски)
-  # + Pool
-  # + SDN (использование SDN, без создания — можно включить при желании)
+  # полный набор нужных прав, валидатор сам выкинет отсутствующие
   local want_privs=(
-    # Pool
     "Pool.Audit"
 
-    # Datastore
     "Datastore.Audit"
     "Datastore.Allocate"
     "Datastore.AllocateSpace"
     "Datastore.AllocateTemplate"
 
-    # VM basic
     "VM.Audit"
     "VM.Allocate"
     "VM.Clone"
@@ -281,7 +165,6 @@ ensure_students_role_custom_auto() {
     "VM.Backup"
     "VM.Snapshot"
 
-    # VM config
     "VM.Config.Options"
     "VM.Config.CPU"
     "VM.Config.Memory"
@@ -291,22 +174,20 @@ ensure_students_role_custom_auto() {
     "VM.Config.Cloudinit"
     "VM.Config.HWType"
 
-    # Guest Agent (если есть)
     "VM.GuestAgent.Audit"
     "VM.GuestAgent.FileRead"
     "VM.GuestAgent.FileSystem"
     "VM.GuestAgent.PowerMgmt"
 
-    # SDN (если используете SDN)
+    "Mapping.Audit"
+    "Mapping.Use"
+
     "SDN.Audit"
     "SDN.Use"
-    # "SDN.Allocate"   # <- раскомментируй, если студентам надо СОЗДАВАТЬ SDN сети
+    # "SDN.Allocate"   # раскомментируй, если студентам надо создавать SDN
   )
 
-  local ok=() dropped=()
-  local p
-
-  # Проверяем каждую привилегию на валидность через временную роль
+  local ok=() dropped=() p
   for p in "${want_privs[@]}"; do
     pveum role delete "$tmprole" >/dev/null 2>&1 || true
     if pveum role add "$tmprole" -privs "$p" >/dev/null 2>&1; then
@@ -316,55 +197,44 @@ ensure_students_role_custom_auto() {
     fi
   done
   pveum role delete "$tmprole" >/dev/null 2>&1 || true
+  ((${#ok[@]} > 0)) || die "Не удалось собрать привилегии для $role"
 
-  ((${#ok[@]} > 0)) || die "Не удалось подобрать ни одной валидной привилегии для роли $role"
-
-  # Пересоздаём StudentsLab
+  # пересоздаём StudentsLab
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
-
   pveum role add "$role" -privs "$(IFS=','; echo "${ok[*]}")" >/dev/null
 
-  echo "[*] Роль $role создана/обновлена (валидных privs: ${#ok[@]})" >&2
+  echo "[*] Роль $role создана/обновлена (privs: ${#ok[@]})" >&2
   if ((${#dropped[@]} > 0)); then
     echo "[!] Пропущены отсутствующие привилегии:" >&2
     printf "    - %s\n" "${dropped[@]}" >&2
   fi
 }
 
-# =========================
-# Access setup: groups/pool/ACL/users
-# =========================
-group_exists() {
-  local g="$1"
-  pveum group list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$g"
-}
+# ---------- groups/pool/acl/users ----------
+group_exists(){ pveum group list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$1"; }
 
 ensure_group() {
   local g="$1"
-  if group_exists "$g"; then
-    echo "[*] Группа $g уже существует" >&2
-    return 0
-  fi
+  if group_exists "$g"; then echo "[*] Группа $g уже существует" >&2; return 0; fi
   pveum group add "$g" >/dev/null
   echo "[*] Создана группа $g" >&2
 }
 
 ensure_pool() {
   local pool="$1"
-  have pvesh || die "Нет pvesh (это точно Proxmox VE?)"
+  have pvesh || die "Нет pvesh"
   if pvesh get /pools 2>/dev/null | grep -q "\"poolid\" *: *\"$pool\""; then
-    echo "[*] Пул $pool уже существует" >&2
-    return 0
+    echo "[*] Пул $pool уже существует" >&2; return 0
   fi
   pvesh create /pools --poolid "$pool" >/dev/null
   echo "[*] Создан пул $pool" >&2
 }
 
-set_acl_group() {
-  local path="$1" group="$2" role="$3" propagate="${4:-1}"
-  if [[ "$propagate" == "1" ]]; then
+acl_group() {
+  local path="$1" group="$2" role="$3" prop="${4:-1}"
+  if [[ "$prop" == "1" ]]; then
     pveum aclmod "$path" -group "$group" -role "$role" -propagate 1 >/dev/null
   else
     pveum aclmod "$path" -group "$group" -role "$role" >/dev/null
@@ -388,24 +258,21 @@ setup_access_model() {
 
   read -r -p "Логин учителя (латиница/цифры/._-): " tlogin
   [[ -n "${tlogin:-}" ]] || die "Логин учителя пустой"
-  validate_userid_localpart "$tlogin" || die "Логин только латиница/цифры и . _ - (без пробелов/кириллицы)"
+  validate_userid_localpart "$tlogin" || die "Логин только латиница/цифры и . _ -"
 
-  local tpass
-  tpass="$(read_secret_twice_min8 "Пароль учителя")"
+  local tpass; tpass="$(read_secret_twice_min8 "Пароль учителя")"
 
-  echo "Настроим доступ студентов к storage (для дисков ВМ)." >&2
+  echo "Настроим storage для дисков ВМ (images):" >&2
   mapfile -t storages < <(get_storages)
   ((${#storages[@]} > 0)) || die "Список storage пуст"
 
-  # Auto add 'local' for ISO if present
+  # auto add 'local' if exists for ISO selection
   if storage_exists_any "local"; then
     if ! printf "%s\n" "${storages[@]}" | grep -qx "local"; then
       storages+=("local")
       echo "[*] Добавил storage 'local' автоматически (для ISO)." >&2
     fi
   fi
-
-  # Unique storages
   mapfile -t storages < <(printf "%s\n" "${storages[@]}" | awk '!seen[$0]++')
   echo "[*] Выбраны storage: ${storages[*]}" >&2
 
@@ -415,11 +282,26 @@ setup_access_model() {
 
   ensure_students_role_custom_auto
 
-  # ACLs
-  set_acl_group "/" "$TEACHERS_GROUP" "Administrator" 1
-  set_acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
+  # --- ACL Teachers (full admin) ---
+  acl_group "/" "$TEACHERS_GROUP" "Administrator" 1
+
+  # --- ACL Students ---
+  # 1) Чтобы UI не давал 403 на нодах/обзоре (read-only)
+  acl_group "/" "$STUDENTS_GROUP" "PVEAuditor" 1
+
+  # 2) Чтобы выбирать vmbr/mappings и SDN в мастере
+  acl_group "/" "$STUDENTS_GROUP" "PVEMappingUser" 1
+  acl_group "/" "$STUDENTS_GROUP" "PVESDNUser" 1
+
+  # 3) Чтобы создавать ВМ в пуле и добавлять их в пул (Pool.Allocate)
+  acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "PVEPoolAdmin" 1
+
+  # 4) Основные права студентов на пул
+  acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
+
+  # 5) Права на storage
   for st in "${storages[@]}"; do
-    set_acl_group "/storage/$st" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
+    acl_group "/storage/$st" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
   done
 
   # Users
@@ -431,23 +313,19 @@ setup_access_model() {
   echo "    Студент: ${DEFAULT_STUDENT_USER}@${REALM} (пароль: ${DEFAULT_STUDENT_PASS})" >&2
 }
 
-# =========================
-# Menu
-# =========================
+# ---------- menu ----------
 main_menu() {
   need_root
-  have pveum || die "Нет pveum (это точно Proxmox VE?)"
-
+  have pveum || die "Нет pveum"
   while true; do
     echo
     echo "========== PVE MultiTool =========="
     echo "1) Бесплатные репозитории + apt update"
-    echo "2) Users/Groups/ACL (Teachers+students) + StudentsLab auto-role"
+    echo "2) Users/Groups/ACL (Teachers+students) + create VM without 403"
     echo "3) Сделать 1 + 2"
     echo "4) Выход"
     echo "==================================="
     read -r -p "Выбор [1-4]: " c
-
     case "${c:-}" in
       1) switch_repos_and_update ;;
       2) setup_access_model ;;
