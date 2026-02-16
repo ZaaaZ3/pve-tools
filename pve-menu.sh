@@ -144,19 +144,31 @@ create_user_sdv_pve() {
   local realm="pve"
   local pass
 
-  pass="$(prompt_password)"
+  # спросить пароль (скрыто) + проверка >= 8
+  while true; do
+    read -rsp "Введите пароль для ${user}@${realm} (мин. 8 символов): " p1; echo
+    read -rsp "Повторите пароль: " p2; echo
+    [[ "$p1" == "$p2" ]] || { echo "Пароли не совпадают."; continue; }
+    (( ${#p1} >= 8 )) || { echo "Пароль должен быть минимум 8 символов."; continue; }
+    pass="$p1"
+    break
+  done
 
-  if pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
-    echo "[*] Пользователь ${user}@${realm} уже существует — обновляю пароль"
-    pveum user modify "${user}@${realm}" --password "$pass"
-  else
+  # создать (если нет)
+  if ! pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
     echo "[*] Создаю пользователя ${user}@${realm}"
-    pveum user add "${user}@${realm}" --password "$pass" --comment "Created by pve-menu"
+    pveum user add "${user}@${realm}" --comment "Created by pve-menu"
+  else
+    echo "[*] Пользователь уже существует"
   fi
 
-  echo "[+] Пользователь готов: ${user}@${realm}"
-}
+  echo "[*] Устанавливаю пароль через pveum passwd..."
+  # pveum passwd спрашивает пароль 2 раза — подаем через stdin
+  printf "%s\n%s\n" "$pass" "$pass" | pveum passwd "${user}@${realm}"
 
+  echo "[+] Готово: ${user}@${realm}"
+  echo "    В веб-логине выбери Realm: 'Proxmox VE authentication server (pve)'"
+}
 # ===== Main menu =====
 while true; do
   echo
