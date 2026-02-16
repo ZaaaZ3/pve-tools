@@ -202,7 +202,7 @@ ensure_pool() {
 ensure_role_students() {
   local role="$1"
 
-  # Желаемый набор (максимальный). Скрипт потом отфильтрует по доступным.
+  # Желаемый набор (без VM.Monitor!)
   local want_privs=(
     "VM.Audit"
     "VM.Allocate"
@@ -226,8 +226,7 @@ ensure_role_students() {
     "Pool.Audit"
   )
 
-  # Получаем список реально доступных привилегий на этой версии PVE
-  # pveum role list выводит таблицу; выцепим все "Privs:" и разобьём по запятым.
+  # Какие привилегии реально есть в твоей версии PVE
   local available
   available="$(pveum role list 2>/dev/null \
     | awk -F': ' '/^Privs: /{print $2}' \
@@ -236,7 +235,7 @@ ensure_role_students() {
 
   [[ -n "$available" ]] || die "Не удалось получить список привилегий (pveum role list пуст?)"
 
-  # Фильтруем желаемые -> существующие
+  # Фильтруем: берём только те, что существуют
   local ok=() dropped=()
   local p
   for p in "${want_privs[@]}"; do
@@ -256,7 +255,7 @@ ensure_role_students() {
     printf "    - %s\n" "${dropped[@]}" >&2
   fi
 
-  # Пере-создаём роль (проще и надежнее)
+  # Пере-создаём роль (проще и надёжнее)
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
@@ -264,7 +263,6 @@ ensure_role_students() {
   pveum role add "$role" -privs "$(IFS=','; echo "${ok[*]}")" >/dev/null
   echo "[*] Роль $role создана/обновлена (privs: ${#ok[@]})" >&2
 }
-
 
 set_acl_group() {
   local path="$1" group="$2" role="$3" propagate="${4:-1}"
