@@ -62,7 +62,7 @@ EOF
 create_user_sdv() {
   local user="sdv"
   local realm="pam"
-  local pass="123"
+  local pass="12345678"
 
   # Проверка: не существует ли уже
   if pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
