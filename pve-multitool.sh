@@ -287,22 +287,7 @@ setup_access_model() {
 
   # --- ACL Students ---
   # 1) Чтобы UI не давал 403 на нодах/обзоре (read-only)
-  acl_group "/" "$STUDENTS_GROUP" "PVEAuditor" 1
-
-  # 2) Чтобы выбирать vmbr/mappings и SDN в мастере
-  acl_group "/" "$STUDENTS_GROUP" "PVEMappingUser" 1
-  acl_group "/" "$STUDENTS_GROUP" "PVESDNUser" 1
-
-  # 3) Чтобы создавать ВМ в пуле и добавлять их в пул (Pool.Allocate)
-  acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "PVEPoolAdmin" 1
-
-  # 4) Основные права студентов на пул
-  acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
-
-  # 5) Права на storage
-  for st in "${storages[@]}"; do
-    acl_group "/storage/$st" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
-  done
+  acl_group "/" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
 
   # Users
   ensure_user_pve "${tlogin}@${REALM}" "$tpass" "$TEACHERS_GROUP"
