@@ -201,8 +201,9 @@ ensure_pool() {
 
 ensure_role_students() {
   local role="$1"
+  local tmprole="__privcheck_tmp__$$"
 
-  # Желаемый набор (без VM.Monitor!)
+  # Набор привилегий (без VM.Monitor)
   local want_privs=(
     "VM.Audit"
     "VM.Allocate"
@@ -226,36 +227,32 @@ ensure_role_students() {
     "Pool.Audit"
   )
 
-  # Какие привилегии реально есть в твоей версии PVE
-  local available
-  available="$(pveum role list 2>/dev/null \
-    | awk -F': ' '/^Privs: /{print $2}' \
-    | tr ',' '\n' | tr -d ' \t' \
-    | awk 'NF' | sort -u)"
-
-  [[ -n "$available" ]] || die "Не удалось получить список привилегий (pveum role list пуст?)"
-
-  # Фильтруем: берём только те, что существуют
   local ok=() dropped=()
   local p
+
+  # Проверяем каждую привилегию "на реальность" через временную роль
   for p in "${want_privs[@]}"; do
-    if grep -qx "$p" <<<"$available"; then
+    # удалим tmprole если вдруг осталась
+    pveum role delete "$tmprole" >/dev/null 2>&1 || true
+
+    if pveum role add "$tmprole" -privs "$p" >/dev/null 2>&1; then
       ok+=("$p")
     else
       dropped+=("$p")
     fi
   done
 
-  if ((${#ok[@]} == 0)); then
-    die "После фильтрации не осталось привилегий для роли $role"
-  fi
+  # чистим tmprole
+  pveum role delete "$tmprole" >/dev/null 2>&1 || true
+
+  ((${#ok[@]} > 0)) || die "Не удалось подобрать ни одной валидной привилегии для роли $role"
 
   if ((${#dropped[@]} > 0)); then
     echo "[!] Эти привилегии отсутствуют в твоей версии PVE и будут пропущены:" >&2
     printf "    - %s\n" "${dropped[@]}" >&2
   fi
 
-  # Пере-создаём роль (проще и надёжнее)
+  # пересоздаём целевую роль
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
