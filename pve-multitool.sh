@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== Defaults =====
+# =========================
+# Defaults
+# =========================
 REALM="pve"
 
 TEACHERS_GROUP="Teachers"
@@ -12,12 +14,21 @@ STUDENTS_ROLE="StudentsLab"
 DEFAULT_STUDENT_USER="user"
 DEFAULT_STUDENT_PASS="P@ssw0rd"
 
-# ===== Helpers =====
+# =========================
+# Helpers
+# =========================
 die(){ echo "ERROR: $*" >&2; exit 1; }
 need_root(){ [[ $EUID -eq 0 ]] || die "Запусти от root"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
-# ===== Repo switch =====
+validate_userid_localpart() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+# =========================
+# Repo switch
+# =========================
 detect_codename() {
   source /etc/os-release
   [[ -n "${VERSION_CODENAME:-}" ]] || die "Не удалось определить Debian codename (VERSION_CODENAME)"
@@ -86,7 +97,9 @@ switch_repos_and_update() {
   echo "[+] Репозитории переключены и обновлены." >&2
 }
 
-# ===== Password prompt =====
+# =========================
+# Password prompt
+# =========================
 read_secret_twice_min8() {
   local prompt="$1" p1 p2
   while true; do
@@ -99,41 +112,33 @@ read_secret_twice_min8() {
   done
 }
 
-# ===== Storage selection (no hang) =====
-list_storages() {
+# =========================
+# Storage selection
+# =========================
+list_storages_images() {
   have pvesm || die "Нет pvesm (это точно Proxmox VE?)"
 
-  # Сначала пытаемся получить storages, где можно создавать диски ВМ (images)
+  # Prefer storages that support VM disks (images). Timeout prevents hangs.
   if have timeout; then
-    if timeout 5s pvesm status --content images 2>/tmp/pvesm_status.err >/tmp/pvesm_status.out; then
-      awk 'NR>1{print $1}' /tmp/pvesm_status.out | sort -u
-      return 0
-    fi
-    # Фоллбек: контейнеры (rootdir)
-    if timeout 5s pvesm status --content rootdir 2>/tmp/pvesm_status.err >/tmp/pvesm_status.out; then
-      awk 'NR>1{print $1}' /tmp/pvesm_status.out | sort -u
-      return 0
-    fi
+    timeout 5s pvesm status --content images 2>/tmp/pvesm_status.err \
+      | awk 'NR>1{print $1}' | sort -u
   else
-    pvesm status --content images 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u && return 0
-    pvesm status --content rootdir 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u && return 0
-  fi
-
-  # Последний фоллбек — всё подряд (но лучше не надо)
-  if have timeout; then
-    timeout 5s pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
-  else
-    pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
+    pvesm status --content images 2>/tmp/pvesm_status.err \
+      | awk 'NR>1{print $1}' | sort -u
   fi
 }
 
+storage_exists_any() {
+  local sid="$1"
+  pvesm status 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$sid"
+}
 
 choose_storages_interactive() {
   local storages=() i choice selected=()
-  mapfile -t storages < <(list_storages || true)
+  mapfile -t storages < <(list_storages_images || true)
 
   if ((${#storages[@]} == 0)); then
-    echo "[!] Автообнаружение storage не удалось. Перехожу на ручной ввод." >&2
+    echo "[!] Не удалось автообнаружить storages с content=images. Введи вручную." >&2
     if [[ -s /tmp/pvesm_status.err ]]; then
       echo "    Ошибка pvesm:" >&2
       sed 's/^/      /' /tmp/pvesm_status.err | tail -n 20 >&2
@@ -141,7 +146,7 @@ choose_storages_interactive() {
     return 1
   fi
 
-  echo "Доступные storage:" >&2
+  echo "Доступные storage (для дисков ВМ / images):" >&2
   for i in "${!storages[@]}"; do
     printf "  %2d) %s\n" $((i+1)) "${storages[$i]}" >&2
   done
@@ -166,20 +171,20 @@ choose_storages_interactive() {
 
 get_storages() {
   echo "Storage режим:" >&2
-  echo "  1) Автообнаружение + выбрать из списка" >&2
+  echo "  1) Автообнаружение (images) + выбрать из списка" >&2
   echo "  2) Указать вручную (через пробел или запятую)" >&2
   read -r -p "Выбор [1-2]: " mode
 
   case "${mode:-}" in
     1)
       if ! choose_storages_interactive; then
-        read -r -p "Введи storage IDs (пример: local local-lvm) или через запятую: " s
+        read -r -p "Введи storage IDs (пример: local-lvm) или через запятую: " s
         s="${s//,/ }"
         for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
       fi
       ;;
     2)
-      read -r -p "Введи storage IDs (пример: local local-lvm) или через запятую: " s
+      read -r -p "Введи storage IDs (пример: local-lvm local) или через запятую: " s
       s="${s//,/ }"
       for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
       ;;
@@ -189,7 +194,89 @@ get_storages() {
   esac
 }
 
-# ===== Access setup =====
+# =========================
+# Role autodetection from pveum role list (no JSON/Python)
+# =========================
+list_role_ids() {
+  pveum role list 2>/dev/null | awk 'NR>1 && NF{print $1}' | sort -u
+}
+
+get_role_privs() {
+  local rid="$1"
+  # remove first column + separators, return "privs" field
+  pveum role list 2>/dev/null | awk -v rid="$rid" '
+    NR>1 && $1==rid {
+      $1="";
+      sub(/^[ \t]+[|]?[ \t]+/,"");
+      print;
+      exit
+    }'
+}
+
+build_students_privs_from_roles() {
+  local roles=("PVEVMAdmin" "PVEDatastoreAdmin" "PVESDNUser")
+  local available
+  available="$(list_role_ids)"
+
+  local tmp
+  tmp="$(mktemp)"
+  : > "$tmp"
+
+  local r
+  for r in "${roles[@]}"; do
+    if grep -qx "$r" <<<"$available"; then
+      get_role_privs "$r" >> "$tmp"
+      echo "," >> "$tmp"
+    fi
+  done
+
+  # Fallback minimal set if none found
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    echo "VM.Audit,VM.Allocate,VM.Console,VM.PowerMgmt,Datastore.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,Datastore.Allocate,Pool.Audit"
+    return 0
+  fi
+
+  # Split/trim/uniq + filter allow/deny
+  tr ',' '\n' < "$tmp" \
+    | tr -d '\r' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+    | awk 'NF' \
+    | awk '
+        $0 ~ /^(Sys\.|User\.|Permissions\.|Realm\.|Group\.)/ {next}
+        $0 ~ /^(VM\.|Datastore\.|SDN\.|Pool\.)/ {print; next}
+        {next}
+      ' \
+    | sort -u \
+    | awk 'BEGIN{first=1} { if(!first) printf ","; printf "%s",$0; first=0 } END{ printf "\n" }'
+
+  rm -f "$tmp"
+}
+
+ensure_students_role_custom_auto() {
+  local role="$STUDENTS_ROLE"
+  local privs
+  privs="$(build_students_privs_from_roles)"
+
+  # Ensure essential privs exist
+  for must in "Datastore.Allocate" "Datastore.Audit" "Datastore.AllocateSpace" "Datastore.AllocateTemplate" "VM.Allocate" "VM.Audit"; do
+    if ! grep -q "$must" <<<"$privs"; then
+      privs="${privs},${must}"
+    fi
+  done
+
+  # Recreate role
+  if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
+    pveum role delete "$role" >/dev/null 2>&1 || true
+  fi
+
+  pveum role add "$role" -privs "$privs" >/dev/null
+  echo "[*] Роль $role создана/обновлена (auto from roles: PVEVMAdmin+PVEDatastoreAdmin+PVESDNUser)" >&2
+}
+
+# =========================
+# Access setup: groups/pool/ACL/users
+# =========================
 group_exists() {
   local g="$1"
   pveum group list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$g"
@@ -216,73 +303,6 @@ ensure_pool() {
   echo "[*] Создан пул $pool" >&2
 }
 
-ensure_students_role_custom() {
-  local role="StudentsLab"
-
-  have pvesh || die "Нет pvesh"
-  have python3 || die "Нет python3"
-
-  # Берём привилегии стандартных ролей и объединяем:
-  # - PVEVMAdmin: всё по ВМ
-  # - PVEDatastoreAdmin: всё по storage (включая Datastore.Allocate!)
-  # - PVESDNUser: SDN.Use + SDN.Audit (без SDN.Allocate)
-  #
-  # Потом фильтруем: оставляем только VM.*, Datastore.*, SDN.*, Pool.*, Mapping.Use/Mapping.Audit
-  # и выкидываем Sys.*, User.*, Permissions.*, Realm.*, Group.* и т.п.
-  local privs
-  privs="$(
-    pvesh get /access/roles --output-format json \
-    | python3 - <<'PY'
-import json, sys
-roles = json.load(sys.stdin)
-
-want_roles = {"PVEVMAdmin", "PVEDatastoreAdmin", "PVESDNUser", "PVEPoolUser", "PVEPoolAdmin"}
-allow_prefixes = ("VM.", "Datastore.", "SDN.", "Pool.")
-allow_exact = {"Mapping.Use", "Mapping.Audit"}  # опционально, но полезно
-
-deny_prefixes = ("Sys.", "User.", "Permissions.", "Realm.", "Group.")
-
-s = set()
-for r in roles:
-    rid = r.get("roleid")
-    if rid in want_roles:
-        privs = r.get("privs") or ""
-        for p in privs.split(","):
-            p = p.strip()
-            if not p:
-                continue
-            s.add(p)
-
-def allowed(p):
-    if p in deny_exact: return False
-    if p.startswith(deny_prefixes): return False
-    if p.startswith(allow_prefixes): return True
-    if p in allow_exact: return True
-    return False
-
-out = sorted([p for p in s if allowed(p)])
-
-# На всякий случай гарантируем базовые нужные:
-for must in ("Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit", "VM.Allocate", "VM.Audit"):
-    out.append(must)
-
-out = sorted(set(out))
-print(",".join(out))
-PY
-  )"
-
-  [[ -n "$privs" ]] || die "Не удалось собрать список привилегий для $role"
-
-  # Пересоздаём роль
-  if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
-    pveum role delete "$role" >/dev/null 2>&1 || true
-  fi
-
-  pveum role add "$role" -privs "$privs" >/dev/null
-  echo "[*] Роль $role создана/обновлена (auto: VM/Datastore/SDN/Pool)" >&2
-}
-
-
 set_acl_group() {
   local path="$1" group="$2" role="$3" propagate="${4:-1}"
   if [[ "$propagate" == "1" ]]; then
@@ -300,7 +320,6 @@ ensure_user_pve() {
   else
     pveum user add "$userid" --password "$pass" >/dev/null
   fi
-  # primary group
   pveum user modify "$userid" --group "$group" >/dev/null
   echo "[*] User: $userid in group $group" >&2
 }
@@ -308,25 +327,37 @@ ensure_user_pve() {
 setup_access_model() {
   echo "=== Настройка пользователей/групп/прав ===" >&2
 
-  read -r -p "Логин учителя (без @realm, пример: teacher1): " tlogin
+  read -r -p "Логин учителя (латиница/цифры/._-): " tlogin
   [[ -n "${tlogin:-}" ]] || die "Логин учителя пустой"
+  validate_userid_localpart "$tlogin" || die "Логин только латиница/цифры и . _ - (без пробелов/кириллицы)"
+
   local tpass
   tpass="$(read_secret_twice_min8 "Пароль учителя")"
 
-  echo "Настроим доступ студентов к storage (для дисков/шаблонов)." >&2
+  echo "Настроим доступ студентов к storage (для дисков ВМ)." >&2
   mapfile -t storages < <(get_storages)
   ((${#storages[@]} > 0)) || die "Список storage пуст"
+
+  # Auto add 'local' for ISO if present
+  if storage_exists_any "local"; then
+    if ! printf "%s\n" "${storages[@]}" | grep -qx "local"; then
+      storages+=("local")
+      echo "[*] Добавил storage 'local' автоматически (для ISO)." >&2
+    fi
+  fi
+
+  # Unique storages
+  mapfile -t storages < <(printf "%s\n" "${storages[@]}" | awk '!seen[$0]++')
   echo "[*] Выбраны storage: ${storages[*]}" >&2
 
   ensure_group "$TEACHERS_GROUP"
   ensure_group "$STUDENTS_GROUP"
   ensure_pool "$STUDENTS_POOL"
-  ensure_students_role_custom
 
-  # ACL: teachers full admin
+  ensure_students_role_custom_auto
+
+  # ACLs
   set_acl_group "/" "$TEACHERS_GROUP" "Administrator" 1
-
-  # ACL: students only in pool + chosen storages
   set_acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
   for st in "${storages[@]}"; do
     set_acl_group "/storage/$st" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
@@ -341,7 +372,9 @@ setup_access_model() {
   echo "    Студент: ${DEFAULT_STUDENT_USER}@${REALM} (пароль: ${DEFAULT_STUDENT_PASS})" >&2
 }
 
-# ===== Menu =====
+# =========================
+# Menu
+# =========================
 main_menu() {
   need_root
   have pveum || die "Нет pveum (это точно Proxmox VE?)"
@@ -350,7 +383,7 @@ main_menu() {
     echo
     echo "========== PVE MultiTool =========="
     echo "1) Бесплатные репозитории + apt update"
-    echo "2) Пользователи/группы/права (Teachers + students) + кастомная роль"
+    echo "2) Users/Groups/ACL (Teachers+students) + StudentsLab auto-role"
     echo "3) Сделать 1 + 2"
     echo "4) Выход"
     echo "==================================="
