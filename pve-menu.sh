@@ -62,23 +62,19 @@ EOF
 create_user_sdv() {
   local user="sdv"
   local realm="pam"
-  local pass="12345678(Aa)"
+  local pass="12345678"
 
-  # Проверка: не существует ли уже
   if pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
-    echo "[*] Пользователь ${user}@${realm} уже существует — обновляю пароль."
+    echo "[*] Пользователь уже существует — обновляю пароль"
   else
-    echo "[*] Создаю пользователя: ${user}@${realm}"
-    # comment можно убрать/изменить
-    pveum user add "${user}@${realm}" --comment "Created by pve-menu"
+    pveum user add "${user}@${realm}" --comment "Created by script"
   fi
 
-  echo "[*] Устанавливаю пароль..."
   printf "%s\n%s\n" "$pass" "$pass" | pveum passwd "${user}@${realm}"
 
   echo "[+] Готово: ${user}@${realm} пароль: ${pass}"
-  echo "    (Realm pam означает системную учётку PVE, это нормально для стендов.)"
 }
+
 
 main_menu() {
   need_root
