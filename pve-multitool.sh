@@ -114,18 +114,36 @@ read_secret_twice_min8() {
 # Storage selection
 # =========================
 list_storages_for_vm() {
-  # We consider storages that can hold VM disks (images/rootdir).
-  # pvesm exists on PVE; we keep it simple and robust.
   have pvesm || die "Нет pvesm (это точно Proxmox VE?)"
-  # Print unique storage IDs that support images (VM disks)
-  pvesm status 2>/dev/null | awk 'NR>1{print $1}' | sort -u
+
+  # pvesm status иногда виснет на проблемном storage (NFS/Ceph и т.п.)
+  # Дадим 5 секунд и не будем зависать.
+  if have timeout; then
+    timeout 5s pvesm status 2>/tmp/pvesm_status.err \
+      | awk 'NR>1{print $1}' | sort -u
+  else
+    # fallback без timeout (редко)
+    pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
+  fi
 }
 
 choose_storages_interactive() {
-  local storages=() line i choice selected=()
+  local storages=() i choice selected=()
 
-  mapfile -t storages < <(list_storages_for_vm)
-  ((${#storages[@]} > 0)) || die "Не найдено ни одного storage (pvesm status пуст)."
+  mapfile -t storages < <(list_storages_for_vm || true)
+
+  if ((${#storages[@]} == 0)); then
+    echo
+    echo "[!] Не удалось получить список storage автоматически."
+    echo "    Возможные причины: проблемный/подвисший storage (NFS/Ceph), pvesm status завис/ошибка."
+    if [[ -s /tmp/pvesm_status.err ]]; then
+      echo "    Ошибка:"
+      sed 's/^/      /' /tmp/pvesm_status.err | tail -n 20
+    fi
+    echo
+    echo "Перехожу на ручной ввод."
+    return 1
+  fi
 
   echo
   echo "Доступные storage:"
@@ -141,7 +159,6 @@ choose_storages_interactive() {
     return 0
   fi
 
-  # Parse "1,3,4"
   IFS=',' read -ra parts <<<"$choice"
   for part in "${parts[@]}"; do
     part="${part//[[:space:]]/}"
@@ -150,14 +167,10 @@ choose_storages_interactive() {
     selected+=("${storages[$((part-1))]}")
   done
 
-  # uniq
   printf "%s\n" "${selected[@]}" | awk '!seen[$0]++'
 }
 
 get_storages() {
-  # Mode:
-  # 1) auto -> interactive choose
-  # 2) manual -> input list
   echo
   echo "Storage режим:"
   echo "  1) Автообнаружение + выбрать из списка"
@@ -166,22 +179,24 @@ get_storages() {
 
   case "${mode:-}" in
     1)
-      choose_storages_interactive
+      if ! choose_storages_interactive; then
+        # если авто не получилось — ручной ввод
+        read -r -p "Введи storage IDs (пример: local local-lvm) или через запятую: " s
+        s="${s//,/ }"
+        for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
+      fi
       ;;
     2)
       read -r -p "Введи storage IDs (пример: local local-lvm) или через запятую: " s
       s="${s//,/ }"
-      # normalize and validate existence
-      for x in $s; do
-        [[ -n "$x" ]] || continue
-        echo "$x"
-      done | awk '!seen[$0]++'
+      for x in $s; do [[ -n "$x" ]] && echo "$x"; done | awk '!seen[$0]++'
       ;;
     *)
       die "Неверный выбор storage режима"
       ;;
   esac
 }
+
 
 # =========================
 # Access model setup
