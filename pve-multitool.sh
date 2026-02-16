@@ -102,12 +102,31 @@ read_secret_twice_min8() {
 # ===== Storage selection (no hang) =====
 list_storages() {
   have pvesm || die "Нет pvesm (это точно Proxmox VE?)"
+
+  # Сначала пытаемся получить storages, где можно создавать диски ВМ (images)
+  if have timeout; then
+    if timeout 5s pvesm status --content images 2>/tmp/pvesm_status.err >/tmp/pvesm_status.out; then
+      awk 'NR>1{print $1}' /tmp/pvesm_status.out | sort -u
+      return 0
+    fi
+    # Фоллбек: контейнеры (rootdir)
+    if timeout 5s pvesm status --content rootdir 2>/tmp/pvesm_status.err >/tmp/pvesm_status.out; then
+      awk 'NR>1{print $1}' /tmp/pvesm_status.out | sort -u
+      return 0
+    fi
+  else
+    pvesm status --content images 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u && return 0
+    pvesm status --content rootdir 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u && return 0
+  fi
+
+  # Последний фоллбек — всё подряд (но лучше не надо)
   if have timeout; then
     timeout 5s pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   else
     pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   fi
 }
+
 
 choose_storages_interactive() {
   local storages=() i choice selected=()
@@ -198,22 +217,71 @@ ensure_pool() {
 }
 
 ensure_students_role_custom() {
-  # Кастомная роль, без Sys/User/Permissions.*
-  local role="$STUDENTS_ROLE"
+  local role="StudentsLab"
 
-  if pveum role list | awk 'NR>1{print $1}' | grep -qx "$role"; then
+  have pvesh || die "Нет pvesh"
+  have python3 || die "Нет python3"
+
+  # Берём привилегии стандартных ролей и объединяем:
+  # - PVEVMAdmin: всё по ВМ
+  # - PVEDatastoreAdmin: всё по storage (включая Datastore.Allocate!)
+  # - PVESDNUser: SDN.Use + SDN.Audit (без SDN.Allocate)
+  #
+  # Потом фильтруем: оставляем только VM.*, Datastore.*, SDN.*, Pool.*, Mapping.Use/Mapping.Audit
+  # и выкидываем Sys.*, User.*, Permissions.*, Realm.*, Group.* и т.п.
+  local privs
+  privs="$(
+    pvesh get /access/roles --output-format json \
+    | python3 - <<'PY'
+import json, sys
+roles = json.load(sys.stdin)
+
+want_roles = {"PVEVMAdmin", "PVEDatastoreAdmin", "PVESDNUser", "PVEPoolUser", "PVEPoolAdmin"}
+allow_prefixes = ("VM.", "Datastore.", "SDN.", "Pool.")
+allow_exact = {"Mapping.Use", "Mapping.Audit"}  # опционально, но полезно
+
+deny_prefixes = ("Sys.", "User.", "Permissions.", "Realm.", "Group.")
+
+s = set()
+for r in roles:
+    rid = r.get("roleid")
+    if rid in want_roles:
+        privs = r.get("privs") or ""
+        for p in privs.split(","):
+            p = p.strip()
+            if not p:
+                continue
+            s.add(p)
+
+def allowed(p):
+    if p in deny_exact: return False
+    if p.startswith(deny_prefixes): return False
+    if p.startswith(allow_prefixes): return True
+    if p in allow_exact: return True
+    return False
+
+out = sorted([p for p in s if allowed(p)])
+
+# На всякий случай гарантируем базовые нужные:
+for must in ("Datastore.Allocate", "Datastore.AllocateSpace", "Datastore.Audit", "VM.Allocate", "VM.Audit"):
+    out.append(must)
+
+out = sorted(set(out))
+print(",".join(out))
+PY
+  )"
+
+  [[ -n "$privs" ]] || die "Не удалось собрать список привилегий для $role"
+
+  # Пересоздаём роль
+  if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
 
-  pveum role add "$role" -privs \
-"VM.Allocate,VM.Audit,VM.Clone,VM.Console,VM.PowerMgmt,\
-VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk,VM.Config.Network,VM.Config.CDROM,VM.Config.Cloudinit,VM.Config.HWType,\
-Datastore.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,\
-Pool.Audit,\
-SDN.Use,SDN.Allocate,SDN.Audit" >/dev/null
-
-  echo "[*] Роль $role создана/обновлена (с SDN правами)" >&2
+  pveum role add "$role" -privs "$privs" >/dev/null
+  echo "[*] Роль $role создана/обновлена (auto: VM/Datastore/SDN/Pool)" >&2
 }
+
 
 set_acl_group() {
   local path="$1" group="$2" role="$3" propagate="${4:-1}"
