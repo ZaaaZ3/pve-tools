@@ -201,7 +201,7 @@ ensure_students_role_custom() {
   # Кастомная роль, без Sys/User/Permissions.*
   local role="$STUDENTS_ROLE"
 
-  if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
+  if pveum role list | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
 
@@ -209,9 +209,10 @@ ensure_students_role_custom() {
 "VM.Allocate,VM.Audit,VM.Clone,VM.Console,VM.PowerMgmt,\
 VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk,VM.Config.Network,VM.Config.CDROM,VM.Config.Cloudinit,VM.Config.HWType,\
 Datastore.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,\
-Pool.Audit" >/dev/null
+Pool.Audit,\
+SDN.Use,SDN.Allocate,SDN.Audit" >/dev/null
 
-  echo "[*] Роль $role создана/обновлена" >&2
+  echo "[*] Роль $role создана/обновлена (с SDN правами)" >&2
 }
 
 set_acl_group() {
