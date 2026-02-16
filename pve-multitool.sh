@@ -201,19 +201,70 @@ ensure_pool() {
 
 ensure_role_students() {
   local role="$1"
-  local privs=(
-    "VM.Audit" "VM.Allocate" "VM.Clone" "VM.Console" "VM.Monitor" "VM.PowerMgmt"
-    "VM.Config.Options" "VM.Config.CPU" "VM.Config.Memory" "VM.Config.Disk"
-    "VM.Config.Network" "VM.Config.CDROM" "VM.Config.Cloudinit" "VM.Config.HWType"
-    "Datastore.Audit" "Datastore.AllocateSpace" "Datastore.AllocateTemplate"
+
+  # Желаемый набор (максимальный). Скрипт потом отфильтрует по доступным.
+  local want_privs=(
+    "VM.Audit"
+    "VM.Allocate"
+    "VM.Clone"
+    "VM.Console"
+    "VM.PowerMgmt"
+
+    "VM.Config.Options"
+    "VM.Config.CPU"
+    "VM.Config.Memory"
+    "VM.Config.Disk"
+    "VM.Config.Network"
+    "VM.Config.CDROM"
+    "VM.Config.Cloudinit"
+    "VM.Config.HWType"
+
+    "Datastore.Audit"
+    "Datastore.AllocateSpace"
+    "Datastore.AllocateTemplate"
+
     "Pool.Audit"
   )
+
+  # Получаем список реально доступных привилегий на этой версии PVE
+  # pveum role list выводит таблицу; выцепим все "Privs:" и разобьём по запятым.
+  local available
+  available="$(pveum role list 2>/dev/null \
+    | awk -F': ' '/^Privs: /{print $2}' \
+    | tr ',' '\n' | tr -d ' \t' \
+    | awk 'NF' | sort -u)"
+
+  [[ -n "$available" ]] || die "Не удалось получить список привилегий (pveum role list пуст?)"
+
+  # Фильтруем желаемые -> существующие
+  local ok=() dropped=()
+  local p
+  for p in "${want_privs[@]}"; do
+    if grep -qx "$p" <<<"$available"; then
+      ok+=("$p")
+    else
+      dropped+=("$p")
+    fi
+  done
+
+  if ((${#ok[@]} == 0)); then
+    die "После фильтрации не осталось привилегий для роли $role"
+  fi
+
+  if ((${#dropped[@]} > 0)); then
+    echo "[!] Эти привилегии отсутствуют в твоей версии PVE и будут пропущены:" >&2
+    printf "    - %s\n" "${dropped[@]}" >&2
+  fi
+
+  # Пере-создаём роль (проще и надежнее)
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
-  pveum role add "$role" -privs "$(IFS=','; echo "${privs[*]}")" >/dev/null
-  echo "[*] Роль $role создана/обновлена" >&2
+
+  pveum role add "$role" -privs "$(IFS=','; echo "${ok[*]}")" >/dev/null
+  echo "[*] Роль $role создана/обновлена (privs: ${#ok[@]})" >&2
 }
+
 
 set_acl_group() {
   local path="$1" group="$2" role="$3" propagate="${4:-1}"
