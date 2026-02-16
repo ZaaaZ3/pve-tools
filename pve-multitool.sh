@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ===== Defaults =====
 REALM="pve"
+
 TEACHERS_GROUP="Teachers"
 STUDENTS_GROUP="students"
-STUDENTS_ROLE="StudentsLab"
 STUDENTS_POOL="students"
+STUDENTS_ROLE="StudentsLab"
 
 DEFAULT_STUDENT_USER="user"
 DEFAULT_STUDENT_PASS="P@ssw0rd"
 
+# ===== Helpers =====
 die(){ echo "ERROR: $*" >&2; exit 1; }
 need_root(){ [[ $EUID -eq 0 ]] || die "Запусти от root"; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
+# ===== Repo switch =====
 detect_codename() {
   source /etc/os-release
   [[ -n "${VERSION_CODENAME:-}" ]] || die "Не удалось определить Debian codename (VERSION_CODENAME)"
@@ -59,11 +63,7 @@ disable_enterprise_repos() {
       changed=1
     fi
   done
-  if [[ $changed -eq 1 ]]; then
-    echo "[*] Enterprise репозитории отключены." >&2
-  else
-    echo "[*] Enterprise репозитории не найдены (или уже отключены)." >&2
-  fi
+  [[ $changed -eq 1 ]] && echo "[*] Enterprise репозитории отключены." >&2 || echo "[*] Enterprise не найдены/уже отключены." >&2
 }
 
 enable_no_subscription_repo() {
@@ -86,6 +86,7 @@ switch_repos_and_update() {
   echo "[+] Репозитории переключены и обновлены." >&2
 }
 
+# ===== Password prompt =====
 read_secret_twice_min8() {
   local prompt="$1" p1 p2
   while true; do
@@ -98,12 +99,11 @@ read_secret_twice_min8() {
   done
 }
 
-# ---------- Storage selection ----------
+# ===== Storage selection (no hang) =====
 list_storages() {
   have pvesm || die "Нет pvesm (это точно Proxmox VE?)"
   if have timeout; then
-    timeout 5s pvesm status 2>/tmp/pvesm_status.err \
-      | awk 'NR>1{print $1}' | sort -u
+    timeout 5s pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   else
     pvesm status 2>/tmp/pvesm_status.err | awk 'NR>1{print $1}' | sort -u
   fi
@@ -111,8 +111,8 @@ list_storages() {
 
 choose_storages_interactive() {
   local storages=() i choice selected=()
-
   mapfile -t storages < <(list_storages || true)
+
   if ((${#storages[@]} == 0)); then
     echo "[!] Автообнаружение storage не удалось. Перехожу на ручной ввод." >&2
     if [[ -s /tmp/pvesm_status.err ]]; then
@@ -141,6 +141,7 @@ choose_storages_interactive() {
     (( part>=1 && part<=${#storages[@]} )) || die "Номер вне диапазона: $part"
     selected+=("${storages[$((part-1))]}")
   done
+
   printf "%s\n" "${selected[@]}" | awk '!seen[$0]++'
 }
 
@@ -169,7 +170,7 @@ get_storages() {
   esac
 }
 
-# ---------- Access setup ----------
+# ===== Access setup =====
 group_exists() {
   local g="$1"
   pveum group list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$g"
@@ -187,78 +188,30 @@ ensure_group() {
 
 ensure_pool() {
   local pool="$1"
-  if have pvesh; then
-    if pvesh get /pools 2>/dev/null | grep -q "\"poolid\" *: *\"$pool\""; then
-      echo "[*] Пул $pool уже существует" >&2
-      return 0
-    fi
-    pvesh create /pools --poolid "$pool" >/dev/null
-    echo "[*] Создан пул $pool" >&2
-  else
-    echo "[!] pvesh не найден — пул пропущен." >&2
+  have pvesh || die "Нет pvesh (это точно Proxmox VE?)"
+  if pvesh get /pools 2>/dev/null | grep -q "\"poolid\" *: *\"$pool\""; then
+    echo "[*] Пул $pool уже существует" >&2
+    return 0
   fi
+  pvesh create /pools --poolid "$pool" >/dev/null
+  echo "[*] Создан пул $pool" >&2
 }
 
-ensure_role_students() {
-  local role="$1"
-  local tmprole="__privcheck_tmp__$$"
+ensure_students_role_custom() {
+  # Кастомная роль, без Sys/User/Permissions.*
+  local role="$STUDENTS_ROLE"
 
-  # Набор привилегий (без VM.Monitor)
-  local want_privs=(
-    "VM.Audit"
-    "VM.Allocate"
-    "VM.Clone"
-    "VM.Console"
-    "VM.PowerMgmt"
-
-    "VM.Config.Options"
-    "VM.Config.CPU"
-    "VM.Config.Memory"
-    "VM.Config.Disk"
-    "VM.Config.Network"
-    "VM.Config.CDROM"
-    "VM.Config.Cloudinit"
-    "VM.Config.HWType"
-
-    "Datastore.Audit"
-    "Datastore.AllocateSpace"
-    "Datastore.AllocateTemplate"
-
-    "Pool.Audit"
-  )
-
-  local ok=() dropped=()
-  local p
-
-  # Проверяем каждую привилегию "на реальность" через временную роль
-  for p in "${want_privs[@]}"; do
-    # удалим tmprole если вдруг осталась
-    pveum role delete "$tmprole" >/dev/null 2>&1 || true
-
-    if pveum role add "$tmprole" -privs "$p" >/dev/null 2>&1; then
-      ok+=("$p")
-    else
-      dropped+=("$p")
-    fi
-  done
-
-  # чистим tmprole
-  pveum role delete "$tmprole" >/dev/null 2>&1 || true
-
-  ((${#ok[@]} > 0)) || die "Не удалось подобрать ни одной валидной привилегии для роли $role"
-
-  if ((${#dropped[@]} > 0)); then
-    echo "[!] Эти привилегии отсутствуют в твоей версии PVE и будут пропущены:" >&2
-    printf "    - %s\n" "${dropped[@]}" >&2
-  fi
-
-  # пересоздаём целевую роль
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
 
-  pveum role add "$role" -privs "$(IFS=','; echo "${ok[*]}")" >/dev/null
-  echo "[*] Роль $role создана/обновлена (privs: ${#ok[@]})" >&2
+  pveum role add "$role" -privs \
+"VM.Allocate,VM.Audit,VM.Clone,VM.Console,VM.PowerMgmt,\
+VM.Config.Options,VM.Config.CPU,VM.Config.Memory,VM.Config.Disk,VM.Config.Network,VM.Config.CDROM,VM.Config.Cloudinit,VM.Config.HWType,\
+Datastore.Audit,Datastore.AllocateSpace,Datastore.AllocateTemplate,\
+Pool.Audit" >/dev/null
+
+  echo "[*] Роль $role создана/обновлена" >&2
 }
 
 set_acl_group() {
@@ -278,7 +231,7 @@ ensure_user_pve() {
   else
     pveum user add "$userid" --password "$pass" >/dev/null
   fi
-  # Set primary group (simple)
+  # primary group
   pveum user modify "$userid" --group "$group" >/dev/null
   echo "[*] User: $userid in group $group" >&2
 }
@@ -299,10 +252,12 @@ setup_access_model() {
   ensure_group "$TEACHERS_GROUP"
   ensure_group "$STUDENTS_GROUP"
   ensure_pool "$STUDENTS_POOL"
-  ensure_role_students "$STUDENTS_ROLE"
+  ensure_students_role_custom
 
-  # ACLs
+  # ACL: teachers full admin
   set_acl_group "/" "$TEACHERS_GROUP" "Administrator" 1
+
+  # ACL: students only in pool + chosen storages
   set_acl_group "/pool/$STUDENTS_POOL" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
   for st in "${storages[@]}"; do
     set_acl_group "/storage/$st" "$STUDENTS_GROUP" "$STUDENTS_ROLE" 1
@@ -312,9 +267,12 @@ setup_access_model() {
   ensure_user_pve "${tlogin}@${REALM}" "$tpass" "$TEACHERS_GROUP"
   ensure_user_pve "${DEFAULT_STUDENT_USER}@${REALM}" "$DEFAULT_STUDENT_PASS" "$STUDENTS_GROUP"
 
-  echo "[+] Готово. Учитель: ${tlogin}@${REALM} | Студент: ${DEFAULT_STUDENT_USER}@${REALM}" >&2
+  echo "[+] Готово." >&2
+  echo "    Учитель: ${tlogin}@${REALM}" >&2
+  echo "    Студент: ${DEFAULT_STUDENT_USER}@${REALM} (пароль: ${DEFAULT_STUDENT_PASS})" >&2
 }
 
+# ===== Menu =====
 main_menu() {
   need_root
   have pveum || die "Нет pveum (это точно Proxmox VE?)"
@@ -323,7 +281,7 @@ main_menu() {
     echo
     echo "========== PVE MultiTool =========="
     echo "1) Бесплатные репозитории + apt update"
-    echo "2) Пользователи/группы/права (Teachers + students)"
+    echo "2) Пользователи/группы/права (Teachers + students) + кастомная роль"
     echo "3) Сделать 1 + 2"
     echo "4) Выход"
     echo "==================================="
