@@ -254,24 +254,83 @@ build_students_privs_from_roles() {
 }
 
 ensure_students_role_custom_auto() {
-  local role="$STUDENTS_ROLE"
-  local privs
-  privs="$(build_students_privs_from_roles)"
+  local role="StudentsLab"
+  local tmprole="__privcheck_tmp__$$"
 
-  # Ensure essential privs exist
-  for must in "Datastore.Allocate" "Datastore.Audit" "Datastore.AllocateSpace" "Datastore.AllocateTemplate" "VM.Allocate" "VM.Audit"; do
-    if ! grep -q "$must" <<<"$privs"; then
-      privs="${privs},${must}"
+  # Максимально полный набор "нужных" привилегий для студентов:
+  # VM (создание/управление/консоль/бэкап/клон/снапшоты/guest-agent)
+  # + Storage (ISO/шаблоны/диски)
+  # + Pool
+  # + SDN (использование SDN, без создания — можно включить при желании)
+  local want_privs=(
+    # Pool
+    "Pool.Audit"
+
+    # Datastore
+    "Datastore.Audit"
+    "Datastore.Allocate"
+    "Datastore.AllocateSpace"
+    "Datastore.AllocateTemplate"
+
+    # VM basic
+    "VM.Audit"
+    "VM.Allocate"
+    "VM.Clone"
+    "VM.Console"
+    "VM.PowerMgmt"
+    "VM.Backup"
+    "VM.Snapshot"
+
+    # VM config
+    "VM.Config.Options"
+    "VM.Config.CPU"
+    "VM.Config.Memory"
+    "VM.Config.Disk"
+    "VM.Config.Network"
+    "VM.Config.CDROM"
+    "VM.Config.Cloudinit"
+    "VM.Config.HWType"
+
+    # Guest Agent (если есть)
+    "VM.GuestAgent.Audit"
+    "VM.GuestAgent.FileRead"
+    "VM.GuestAgent.FileSystem"
+    "VM.GuestAgent.PowerMgmt"
+
+    # SDN (если используете SDN)
+    "SDN.Audit"
+    "SDN.Use"
+    # "SDN.Allocate"   # <- раскомментируй, если студентам надо СОЗДАВАТЬ SDN сети
+  )
+
+  local ok=() dropped=()
+  local p
+
+  # Проверяем каждую привилегию на валидность через временную роль
+  for p in "${want_privs[@]}"; do
+    pveum role delete "$tmprole" >/dev/null 2>&1 || true
+    if pveum role add "$tmprole" -privs "$p" >/dev/null 2>&1; then
+      ok+=("$p")
+    else
+      dropped+=("$p")
     fi
   done
+  pveum role delete "$tmprole" >/dev/null 2>&1 || true
 
-  # Recreate role
+  ((${#ok[@]} > 0)) || die "Не удалось подобрать ни одной валидной привилегии для роли $role"
+
+  # Пересоздаём StudentsLab
   if pveum role list 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$role"; then
     pveum role delete "$role" >/dev/null 2>&1 || true
   fi
 
-  pveum role add "$role" -privs "$privs" >/dev/null
-  echo "[*] Роль $role создана/обновлена (auto from roles: PVEVMAdmin+PVEDatastoreAdmin+PVESDNUser)" >&2
+  pveum role add "$role" -privs "$(IFS=','; echo "${ok[*]}")" >/dev/null
+
+  echo "[*] Роль $role создана/обновлена (валидных privs: ${#ok[@]})" >&2
+  if ((${#dropped[@]} > 0)); then
+    echo "[!] Пропущены отсутствующие привилегии:" >&2
+    printf "    - %s\n" "${dropped[@]}" >&2
+  fi
 }
 
 # =========================
