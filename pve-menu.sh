@@ -61,32 +61,20 @@ EOF
 
 create_user_sdv() {
   local user="sdv"
-  local realm="pam"
+  local realm="pve"
+  local pass="12345678"   # можно поменять
 
-  read -rsp "Введите пароль (мин. 8 символов): " pass
-  echo
-  read -rsp "Повторите пароль: " pass2
-  echo
-
-  if [[ "$pass" != "$pass2" ]]; then
-    echo "Пароли не совпадают"
-    return 1
+  if pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
+    echo "[*] Пользователь уже существует — обновляю пароль"
+    pveum user modify "${user}@${realm}" --password "$pass"
+  else
+    echo "[*] Создаю пользователя ${user}@${realm}"
+    pveum user add "${user}@${realm}" --password "$pass" --comment "Created by script"
   fi
 
-  if (( ${#pass} < 8 )); then
-    echo "Пароль должен быть минимум 8 символов"
-    return 1
-  fi
-
-  if ! pveum user list | awk '{print $1}' | grep -qx "${user}@${realm}"; then
-    pveum user add "${user}@${realm}" --comment "Created by script"
-  fi
-
-  printf "%s\n%s\n" "$pass" "$pass" | pveum passwd "${user}@${realm}"
-
-  echo "[+] Пользователь создан: ${user}@${realm}"
+  echo "[+] Готово: ${user}@${realm}"
+  echo "    Пароль: $pass"
 }
-
 
 main_menu() {
   need_root
